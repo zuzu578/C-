@@ -4,7 +4,7 @@ using In = Korea.Incheon;
 using System.Collections.Generic;
 
 using Example.Ex1;
-using Example.EX2;
+
 
 //namespace ==> java 에서의 package
 //클래스 , 메서드의 이름이 같아도 서로다른 namespace에 소속되어있으면 다른 클래스이다 .
@@ -55,6 +55,9 @@ namespace Korea
             ex1.Running();
             Example.EX2.Ex ex2 = new Example.EX2.Ex();
             ex2.Running();
+            //네임스페이스의 클래스를 바로 사용할수있게 하는 방법 
+            Ex ex = new Ex();
+            ex.Running();
             }
         }
     }
