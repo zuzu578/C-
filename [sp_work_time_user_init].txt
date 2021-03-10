@@ -1,0 +1,595 @@
+USE [03_TimeKeeper_YoungOne]
+GO
+/****** Object:  StoredProcedure [dbo].[sp_work_time_user_init]    Script Date: 2021-03-09 오전 11:10:06 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+-- =============================================
+-- Author:		brad cho
+-- Create date: 2018.11.30
+-- Modifier : Sanghyun
+-- Modify date: 2019.04.14
+-- Description:	
+/*
+EXEC sp_work_time_user_init 2082
+select * from tb_work_time_user where user_no = 2082
+*/
+-- =============================================
+ALTER PROCEDURE [dbo].[sp_work_time_user_init]	
+	@user_no		INT	
+	
+AS
+BEGIN	
+
+	-- 우선 순위 : 회사휴일 > 재택 > 간주 > 탄력 > 선택 > 자율 > 시차 > 교대 > 표준근로 
+
+	DECLARE @weekday INT
+	SELECT @weekday = DATEPART(DW,GETDATE())
+
+	-- 사용자 정보 조회
+	DECLARE @dept_no	INT
+	DECLARE @company_no	INT
+	SELECT @dept_no = D.dept_no, @company_no = U.company_no
+	FROM [dbo].[tb_dept] D WITH(NOLOCK)
+	INNER JOIN [dbo].[tb_dept_user] DU WITH(NOLOCK)
+	ON D.dept_no = DU.dept_no
+	INNER JOIN [dbo].[tb_user] U WITH(NOLOCK)
+	ON (DU.user_no = U.user_no AND U.retireYN = 'N')
+	WHERE DU.user_no = @user_no	
+
+	-- 탄력근무제 그룹 조회
+	DECLARE @flexible_work_group_no	INT
+	SELECT TOP 1 @flexible_work_group_no = FWG.flexible_work_group_no
+	FROM [dbo].[tb_flexible_work_group] FWG WITH(NOLOCK)
+	INNER JOIN [dbo].[tb_flexible_work_group_member] FWGM WITH(NOLOCK)
+	ON FWG.flexible_work_group_no = FWGM.flexible_work_group_no
+	WHERE SYSDATETIME() BETWEEN FWG.start_date AND FWG.end_date
+	AND (FWGM.user_no = @user_no OR FWGM.dept_no = @dept_no)
+	ORDER BY FWGM.type DESC, FWGM.createdTime ASC
+
+	-- 선택근무제 가능 날짜
+	DECLARE @selective_mon_work_YN CHAR(1)
+	DECLARE @selective_tue_work_YN CHAR(1)
+	DECLARE @selective_wed_work_YN CHAR(1)
+	DECLARE @selective_thu_work_YN CHAR(1)
+	DECLARE @selective_fri_work_YN CHAR(1)
+	DECLARE @selective_sat_work_YN CHAR(1)
+	DECLARE @selective_sun_work_YN CHAR(1)
+	SELECT @selective_mon_work_YN = selective_mon_work_YN, @selective_tue_work_YN = selective_tue_work_YN, @selective_wed_work_YN = selective_wed_work_YN
+	, @selective_thu_work_YN = selective_thu_work_YN, @selective_fri_work_YN = selective_fri_work_YN, @selective_sat_work_YN = selective_sat_work_YN, @selective_sun_work_YN = selective_sun_work_YN
+	FROM [dbo].[tb_company] WITH(NOLOCK)
+	WHERE company_no = @company_no
+
+	-- Step 1-1 : 회사 휴일 조회
+	IF EXISTS(
+		SELECT *
+		FROM [dbo].[tb_holiday] H WITH(NOLOCK)
+		WHERE H.company_no = @company_no
+		AND H.holiday = CONVERT(DATE, SYSDATETIME())
+	)
+	BEGIN	
+		-- Step 1-2 :  회사 휴일 적용
+		INSERT INTO [dbo].[tb_work_time_user] WITH(ROWLOCK)
+		(user_no, work_date, start_time, end_time, work_type)	
+		SELECT @user_no, CONVERT(DATE, GETDATE()), '00:00:00', '00:00:00', 'holiday'		
+		FROM [dbo].[tb_user] U WITH(NOLOCK)
+		WHERE user_no = @user_no		
+		AND U.retireYN = 'N'
+	END
+		ELSE IF EXISTS(
+			
+			SELECT * FROM [dbo].[tb_approval] A WITH(NOLOCK) 
+			INNER JOIN [dbo].[tb_vacation] V WITH(NOLOCK) ON A.approval_no = V.approval_no
+			INNER JOIN [dbo].[tb_vacation_type] VH WITH(NOLOCK) ON V.vacation_type_no = VH.vacation_type_no
+                                                      
+			WHERE VH.type in('90','91','92','93','94','95','96','97','98')AND A.user_no =@user_no  AND CONVERT(DATE, GETDATE()) Between CONVERT(DATE,V.start_date) AND CONVERT(DATE,V.end_date)
+			AND A.status = 'accept'
+		)
+		BEGIN
+
+		IF(@weekday = 1)
+		BEGIN
+			INSERT INTO [dbo].[tb_work_time_user] WITH(ROWLOCK)
+			(user_no, work_date, start_time, end_time)	
+			SELECT @user_no
+			, CONVERT(DATE, GETDATE())
+				, CASE WHEN C.sun_work_YN = 'Y' THEN 
+					CASE WHEN (SELECT count(*) FROM [dbo].[tb_approval] A WITH(NOLOCK)
+								INNER JOIN [dbo].[tb_vacation] V WITH(NOLOCK) ON A.approval_no = V.approval_no
+								INNER JOIN [dbo].[tb_vacation_type] VH WITH(NOLOCK) ON V.vacation_type_no = VH.vacation_type_no                                                      
+								WHERE VH.type in('90','91','92','93','94','95','96','97','98')  AND A.user_no =@user_no  AND CONVERT(DATE, GETDATE()) Between CONVERT(DATE,V.start_date) AND CONVERT(DATE,V.end_date)
+								AND A.status = 'accept') > 0 
+						THEN (SELECT TOP(1) V.end_time FROM [dbo].[tb_approval] A WITH(NOLOCK) 
+								INNER JOIN [dbo].[tb_vacation] V WITH(NOLOCK) ON A.approval_no = V.approval_no
+								INNER JOIN [dbo].[tb_vacation_type] VH WITH(NOLOCK) ON V.vacation_type_no = VH.vacation_type_no
+								WHERE VH.type in('90','91','92','93','94','95','96','97','98')  AND A.user_no =@user_no  AND CONVERT(DATE, GETDATE()) Between CONVERT(DATE,V.start_date) AND CONVERT(DATE,V.end_date)
+								AND A.status = 'accept')
+						ELSE  C.work_start_time END 
+				ELSE '00:00:00' END
+				AS work_start_time	
+				, CASE WHEN C.sun_work_YN = 'Y' THEN 
+				  CASE WHEN (SELECT count(*) FROM [dbo].[tb_approval] A WITH(NOLOCK) 
+			INNER JOIN [dbo].[tb_vacation] V WITH(NOLOCK) ON A.approval_no = V.approval_no
+			INNER JOIN [dbo].[tb_vacation_type] VH WITH(NOLOCK) ON V.vacation_type_no = VH.vacation_type_no
+                                                      
+			WHERE VH.type in('90','91','92','93','94','95','96','97','98')  AND A.user_no =@user_no  AND CONVERT(DATE, GETDATE()) Between CONVERT(DATE,V.start_date) AND CONVERT(DATE,V.end_date)
+			AND A.status = 'accept') > 0 THEN
+				   (SELECT TOP(1) V.end_time FROM [dbo].[tb_approval] A WITH(NOLOCK) 
+			INNER JOIN [dbo].[tb_vacation] V WITH(NOLOCK) ON A.approval_no = V.approval_no
+			INNER JOIN [dbo].[tb_vacation_type] VH WITH(NOLOCK) ON V.vacation_type_no = VH.vacation_type_no
+                                                      
+			WHERE VH.type in('90','91','92','93','94','95','96','97','98')  AND A.user_no =@user_no  AND CONVERT(DATE, GETDATE()) Between CONVERT(DATE,V.start_date) AND CONVERT(DATE,V.end_date)
+			AND A.status = 'accept') ELSE  C.work_end_time END ELSE '00:00:00' END 
+			AS work_end_time	
+
+
+
+				FROM [dbo].[tb_user] U WITH(NOLOCK)
+				INNER JOIN [dbo].[tb_company] C WITH(NOLOCK)
+				ON U.company_no = C.company_no
+
+				WHERE user_no = @user_no
+				AND U.retireYN = 'N'
+		END
+
+		ELSE IF(@weekday = 2)
+		BEGIN
+			INSERT INTO [dbo].[tb_work_time_user] WITH(ROWLOCK)
+			(user_no, work_date, start_time, end_time)	
+			SELECT @user_no, CONVERT(DATE, GETDATE())
+				, CASE WHEN C.mon_work_YN = 'Y' THEN CASE WHEN (SELECT count(*) FROM [dbo].[tb_approval] A WITH(NOLOCK) 
+			INNER JOIN [dbo].[tb_vacation] V WITH(NOLOCK) ON A.approval_no = V.approval_no
+			INNER JOIN [dbo].[tb_vacation_type] VH WITH(NOLOCK) ON V.vacation_type_no = VH.vacation_type_no
+                                                      
+			WHERE VH.type in('90','91','92','93','94','95','96','97','98')  AND A.user_no =@user_no  AND CONVERT(DATE, GETDATE()) Between CONVERT(DATE,V.start_date) AND CONVERT(DATE,V.end_date)
+			AND A.status = 'accept') > 0 THEN
+				   (SELECT TOP(1) V.end_time FROM [dbo].[tb_approval] A WITH(NOLOCK) 
+			INNER JOIN [dbo].[tb_vacation] V WITH(NOLOCK) ON A.approval_no = V.approval_no
+			INNER JOIN [dbo].[tb_vacation_type] VH WITH(NOLOCK) ON V.vacation_type_no = VH.vacation_type_no
+                                                      
+			WHERE VH.type in('90','91','92','93','94','95','96','97','98')  AND A.user_no =@user_no  AND CONVERT(DATE, GETDATE()) Between CONVERT(DATE,V.start_date) AND CONVERT(DATE,V.end_date)
+			AND A.status = 'accept') ELSE  C.work_start_time END ELSE '00:00:00' END AS work_start_time	
+		      , CASE WHEN C.mon_work_YN = 'Y' THEN 
+			    CASE WHEN (SELECT count(*) FROM [dbo].[tb_approval] A WITH(NOLOCK) 
+			INNER JOIN [dbo].[tb_vacation] V WITH(NOLOCK) ON A.approval_no = V.approval_no
+			INNER JOIN [dbo].[tb_vacation_type] VH WITH(NOLOCK) ON V.vacation_type_no = VH.vacation_type_no
+                                                      
+			WHERE VH.type in('90','91','92','93','94','95','96','97','98')  AND A.user_no =@user_no  AND CONVERT(DATE, GETDATE()) Between CONVERT(DATE,V.start_date) AND CONVERT(DATE,V.end_date)
+			AND A.status = 'accept') > 0 THEN
+				   (SELECT TOP(1) V.end_time FROM [dbo].[tb_approval] A WITH(NOLOCK) 
+			INNER JOIN [dbo].[tb_vacation] V WITH(NOLOCK) ON A.approval_no = V.approval_no
+			INNER JOIN [dbo].[tb_vacation_type] VH WITH(NOLOCK) ON V.vacation_type_no = VH.vacation_type_no
+                                                      
+			WHERE VH.type in('90','91','92','93','94','95','96','97','98')  AND A.user_no =@user_no  AND CONVERT(DATE, GETDATE()) Between CONVERT(DATE,V.start_date) AND CONVERT(DATE,V.end_date)
+			AND A.status = 'accept') ELSE  C.work_end_time END ELSE '00:00:00' END AS work_end_time	
+				
+				FROM [dbo].[tb_user] U WITH(NOLOCK)
+				INNER JOIN [dbo].[tb_company] C WITH(NOLOCK)
+				ON U.company_no = C.company_no
+				WHERE user_no = @user_no
+			AND U.retireYN = 'N'
+		END
+		ELSE IF(@weekday = 3)
+		BEGIN
+			INSERT INTO [dbo].[tb_work_time_user] WITH(ROWLOCK)
+			(user_no, work_date, start_time, end_time)	
+			SELECT @user_no, CONVERT(DATE, GETDATE())
+				, CASE WHEN C.tue_work_YN = 'Y' THEN CASE WHEN (SELECT count(*) FROM [dbo].[tb_approval] A WITH(NOLOCK) 
+			INNER JOIN [dbo].[tb_vacation] V WITH(NOLOCK) ON A.approval_no = V.approval_no
+			INNER JOIN [dbo].[tb_vacation_type] VH WITH(NOLOCK) ON V.vacation_type_no = VH.vacation_type_no
+                                                      
+			WHERE VH.type in('90','91','92','93','94','95','96','97','98')  AND A.user_no =@user_no  AND CONVERT(DATE, GETDATE()) Between CONVERT(DATE,V.start_date) AND CONVERT(DATE,V.end_date)
+			AND A.status = 'accept') > 0 THEN
+				   (SELECT TOP(1) V.end_time FROM [dbo].[tb_approval] A WITH(NOLOCK) 
+			INNER JOIN [dbo].[tb_vacation] V WITH(NOLOCK) ON A.approval_no = V.approval_no
+			INNER JOIN [dbo].[tb_vacation_type] VH WITH(NOLOCK) ON V.vacation_type_no = VH.vacation_type_no
+                                                      
+			WHERE VH.type in('90','91','92','93','94','95','96','97','98')  AND A.user_no =@user_no  AND CONVERT(DATE, GETDATE()) Between CONVERT(DATE,V.start_date) AND CONVERT(DATE,V.end_date)
+			AND A.status = 'accept') ELSE  C.work_start_time END ELSE '00:00:00' END AS work_start_time	
+				, CASE WHEN C.tue_work_YN = 'Y' THEN 
+				  CASE WHEN (SELECT count(*) FROM [dbo].[tb_approval] A WITH(NOLOCK) 
+			INNER JOIN [dbo].[tb_vacation] V WITH(NOLOCK) ON A.approval_no = V.approval_no
+			INNER JOIN [dbo].[tb_vacation_type] VH WITH(NOLOCK) ON V.vacation_type_no = VH.vacation_type_no                                
+			WHERE VH.type in('90','91','92','93','94','95','96','97','98')  AND A.user_no =@user_no  AND CONVERT(DATE, GETDATE()) Between CONVERT(DATE,V.start_date) AND CONVERT(DATE,V.end_date)
+			AND A.status = 'accept') > 0 THEN
+				   (SELECT TOP(1) V.end_time FROM [dbo].[tb_approval] A WITH(NOLOCK) 
+			INNER JOIN [dbo].[tb_vacation] V WITH(NOLOCK) ON A.approval_no = V.approval_no
+			INNER JOIN [dbo].[tb_vacation_type] VH WITH(NOLOCK) ON V.vacation_type_no = VH.vacation_type_no                                                    
+			WHERE VH.type in('90','91','92','93','94','95','96','97','98')  AND A.user_no =@user_no  AND CONVERT(DATE, GETDATE()) Between CONVERT(DATE,V.start_date) AND CONVERT(DATE,V.end_date)
+			AND A.status = 'accept') ELSE  C.work_end_time END ELSE '00:00:00' END AS work_end_time	
+				
+				
+				FROM [dbo].[tb_user] U WITH(NOLOCK)
+				INNER JOIN [dbo].[tb_company] C WITH(NOLOCK)
+				ON U.company_no = C.company_no
+				WHERE user_no = @user_no
+			AND U.retireYN = 'N'
+		END
+		ELSE IF(@weekday = 4)
+		BEGIN
+			INSERT INTO [dbo].[tb_work_time_user] WITH(ROWLOCK)
+			(user_no, work_date, start_time, end_time)	
+			SELECT @user_no, CONVERT(DATE, GETDATE())
+				, CASE WHEN C.wed_work_YN = 'Y' THEN CASE WHEN (SELECT count(*) FROM [dbo].[tb_approval] A WITH(NOLOCK) 
+			INNER JOIN [dbo].[tb_vacation] V WITH(NOLOCK) ON A.approval_no = V.approval_no
+			INNER JOIN [dbo].[tb_vacation_type] VH WITH(NOLOCK) ON V.vacation_type_no = VH.vacation_type_no                                                  
+			WHERE VH.type in('90','91','92','93','94','95','96','97','98')  AND A.user_no =@user_no  AND CONVERT(DATE, GETDATE()) Between CONVERT(DATE,V.start_date) AND CONVERT(DATE,V.end_date)
+			AND A.status = 'accept') > 0 THEN
+				   (SELECT TOP(1) V.end_time FROM [dbo].[tb_approval] A WITH(NOLOCK) 
+			INNER JOIN [dbo].[tb_vacation] V WITH(NOLOCK) ON A.approval_no = V.approval_no
+			INNER JOIN [dbo].[tb_vacation_type] VH WITH(NOLOCK) ON V.vacation_type_no = VH.vacation_type_no                                          
+			WHERE VH.type in('90','91','92','93','94','95','96','97','98')  AND A.user_no =@user_no  AND CONVERT(DATE, GETDATE()) Between CONVERT(DATE,V.start_date) AND CONVERT(DATE,V.end_date)
+			AND A.status = 'accept') ELSE  C.work_start_time END ELSE '00:00:00' END AS work_start_time	
+				, CASE WHEN C.wed_work_YN = 'Y' THEN 
+				  CASE WHEN (SELECT count(*) FROM [dbo].[tb_approval] A WITH(NOLOCK) 
+			INNER JOIN [dbo].[tb_vacation] V WITH(NOLOCK) ON A.approval_no = V.approval_no
+			INNER JOIN [dbo].[tb_vacation_type] VH WITH(NOLOCK) ON V.vacation_type_no = VH.vacation_type_no                                   
+			WHERE VH.type in('90','91','92','93','94','95','96','97','98')  AND A.user_no =@user_no  AND CONVERT(DATE, GETDATE()) Between CONVERT(DATE,V.start_date) AND CONVERT(DATE,V.end_date)
+			AND A.status = 'accept') > 0 THEN
+				   (SELECT TOP(1) V.end_time FROM [dbo].[tb_approval] A WITH(NOLOCK) 
+			INNER JOIN [dbo].[tb_vacation] V WITH(NOLOCK) ON A.approval_no = V.approval_no
+			INNER JOIN [dbo].[tb_vacation_type] VH WITH(NOLOCK) ON V.vacation_type_no = VH.vacation_type_no
+                                                      
+			WHERE VH.type in('90','91','92','93','94','95','96','97','98')  AND A.user_no =@user_no  AND CONVERT(DATE, GETDATE()) Between CONVERT(DATE,V.start_date) AND CONVERT(DATE,V.end_date)
+			AND A.status = 'accept') ELSE  C.work_end_time END ELSE '00:00:00' END AS work_end_time	
+				
+				
+				FROM [dbo].[tb_user] U WITH(NOLOCK)
+				INNER JOIN [dbo].[tb_company] C WITH(NOLOCK)
+				ON U.company_no = C.company_no
+				WHERE user_no = @user_no
+			AND U.retireYN = 'N'
+		END
+		ELSE IF(@weekday = 5)
+		BEGIN
+			INSERT INTO [dbo].[tb_work_time_user] WITH(ROWLOCK)
+			(user_no, work_date, start_time, end_time)	
+			SELECT @user_no, CONVERT(DATE, GETDATE())
+				, CASE WHEN C.thu_work_YN = 'Y' THEN CASE WHEN (SELECT count(*) FROM [dbo].[tb_approval] A WITH(NOLOCK) 
+			INNER JOIN [dbo].[tb_vacation] V WITH(NOLOCK) ON A.approval_no = V.approval_no
+			INNER JOIN [dbo].[tb_vacation_type] VH WITH(NOLOCK) ON V.vacation_type_no = VH.vacation_type_no                                                      
+			WHERE VH.type in('90','91','92','93','94','95','96','97','98')  AND A.user_no =@user_no  AND CONVERT(DATE, GETDATE()) Between CONVERT(DATE,V.start_date) AND CONVERT(DATE,V.end_date)
+			AND A.status = 'accept') > 0 THEN
+				   (SELECT TOP(1) V.end_time FROM [dbo].[tb_approval] A WITH(NOLOCK) 
+			INNER JOIN [dbo].[tb_vacation] V WITH(NOLOCK) ON A.approval_no = V.approval_no
+			INNER JOIN [dbo].[tb_vacation_type] VH WITH(NOLOCK) ON V.vacation_type_no = VH.vacation_type_no                                                      
+			WHERE VH.type in('90','91','92','93','94','95','96','97','98')  AND A.user_no =@user_no  AND CONVERT(DATE, GETDATE()) Between CONVERT(DATE,V.start_date) AND CONVERT(DATE,V.end_date)
+			AND A.status = 'accept') ELSE  C.work_start_time END ELSE '00:00:00' END AS work_start_time	
+				, CASE WHEN C.thu_work_YN = 'Y' THEN 					
+					CASE WHEN (SELECT count(*) FROM [dbo].[tb_approval] A WITH(NOLOCK) 
+			INNER JOIN [dbo].[tb_vacation] V WITH(NOLOCK) ON A.approval_no = V.approval_no
+			INNER JOIN [dbo].[tb_vacation_type] VH WITH(NOLOCK) ON V.vacation_type_no = VH.vacation_type_no                                                  
+			WHERE VH.type in('90','91','92','93','94','95','96','97','98')  AND A.user_no =@user_no  AND CONVERT(DATE, GETDATE()) Between CONVERT(DATE,V.start_date) AND CONVERT(DATE,V.end_date)
+			AND A.status = 'accept') > 0 THEN
+				   (SELECT TOP(1) V.end_time FROM [dbo].[tb_approval] A WITH(NOLOCK) 
+			INNER JOIN [dbo].[tb_vacation] V WITH(NOLOCK) ON A.approval_no = V.approval_no
+			INNER JOIN [dbo].[tb_vacation_type] VH WITH(NOLOCK) ON V.vacation_type_no = VH.vacation_type_no
+                                                      
+			WHERE VH.type in('90','91','92','93','94','95','96','97','98')  AND A.user_no =@user_no  AND CONVERT(DATE, GETDATE()) Between CONVERT(DATE,V.start_date) AND CONVERT(DATE,V.end_date)
+			AND A.status = 'accept') ELSE  C.work_end_time END ELSE '00:00:00' END AS work_end_time	
+				
+				
+				FROM [dbo].[tb_user] U WITH(NOLOCK)
+				INNER JOIN [dbo].[tb_company] C WITH(NOLOCK)
+				ON U.company_no = C.company_no
+				WHERE user_no = @user_no
+			AND U.retireYN = 'N'
+		END
+		ELSE IF(@weekday = 6)
+		INSERT INTO [dbo].[tb_work_time_user] WITH(ROWLOCK)
+			(user_no, work_date, start_time, end_time)	
+			SELECT @user_no, CONVERT(DATE, GETDATE())
+				, CASE WHEN C.fri_work_YN = 'Y' THEN CASE WHEN (SELECT count(*) FROM [dbo].[tb_approval] A WITH(NOLOCK) 
+			INNER JOIN [dbo].[tb_vacation] V WITH(NOLOCK) ON A.approval_no = V.approval_no
+			INNER JOIN [dbo].[tb_vacation_type] VH WITH(NOLOCK) ON V.vacation_type_no = VH.vacation_type_no                                             
+			WHERE VH.type in('90','91','92','93','94','95','96','97','98')  AND A.user_no =@user_no  AND CONVERT(DATE, GETDATE()) Between CONVERT(DATE,V.start_date) AND CONVERT(DATE,V.end_date)
+			AND A.status = 'accept') > 0 THEN
+				   (SELECT TOP(1) V.end_time FROM [dbo].[tb_approval] A WITH(NOLOCK) 
+			INNER JOIN [dbo].[tb_vacation] V WITH(NOLOCK) ON A.approval_no = V.approval_no
+			INNER JOIN [dbo].[tb_vacation_type] VH WITH(NOLOCK) ON V.vacation_type_no = VH.vacation_type_no                                                      
+			WHERE VH.type in('90','91','92','93','94','95','96','97','98')  AND A.user_no =@user_no  AND CONVERT(DATE, GETDATE()) Between CONVERT(DATE,V.start_date) AND CONVERT(DATE,V.end_date)
+			AND A.status = 'accept') ELSE  C.work_start_time END ELSE '00:00:00' END AS work_start_time	
+				, CASE WHEN C.fri_work_YN = 'Y' THEN 				
+				  CASE WHEN (SELECT count(*) FROM [dbo].[tb_approval] A WITH(NOLOCK) 
+			INNER JOIN [dbo].[tb_vacation] V WITH(NOLOCK) ON A.approval_no = V.approval_no
+			INNER JOIN [dbo].[tb_vacation_type] VH WITH(NOLOCK) ON V.vacation_type_no = VH.vacation_type_no
+                                                      
+			WHERE VH.type in('90','91','92','93','94','95','96','97','98')  AND A.user_no =@user_no  AND CONVERT(DATE, GETDATE()) Between CONVERT(DATE,V.start_date) AND CONVERT(DATE,V.end_date)
+			AND A.status = 'accept') > 0 THEN
+				   (SELECT TOP(1) V.end_time FROM [dbo].[tb_approval] A WITH(NOLOCK) 
+			INNER JOIN [dbo].[tb_vacation] V WITH(NOLOCK) ON A.approval_no = V.approval_no
+			INNER JOIN [dbo].[tb_vacation_type] VH WITH(NOLOCK) ON V.vacation_type_no = VH.vacation_type_no
+                                                      
+			WHERE VH.type in('90','91','92','93','94','95','96','97','98')  AND A.user_no =@user_no  AND CONVERT(DATE, GETDATE()) Between CONVERT(DATE,V.start_date) AND CONVERT(DATE,V.end_date)
+			AND A.status = 'accept') ELSE  C.work_end_time END ELSE '00:00:00' END AS work_end_time	
+				
+				
+				FROM [dbo].[tb_user] U WITH(NOLOCK)
+				INNER JOIN [dbo].[tb_company] C WITH(NOLOCK)
+				ON U.company_no = C.company_no
+				WHERE user_no = @user_no
+			AND U.retireYN = 'N'
+		END
+		ELSE IF(@weekday = 7)
+		BEGIN
+			INSERT INTO [dbo].[tb_work_time_user] WITH(ROWLOCK)
+			(user_no, work_date, start_time, end_time)	
+			SELECT @user_no, CONVERT(DATE, GETDATE())
+				, CASE WHEN C.sat_work_YN = 'Y' THEN CASE WHEN (SELECT count(*) FROM [dbo].[tb_approval] A WITH(NOLOCK) 
+			INNER JOIN [dbo].[tb_vacation] V WITH(NOLOCK) ON A.approval_no = V.approval_no
+			INNER JOIN [dbo].[tb_vacation_type] VH WITH(NOLOCK) ON V.vacation_type_no = VH.vacation_type_no
+                                                      
+			WHERE VH.type in('90','91','92','93','94','95','96','97','98')  AND A.user_no =@user_no  AND CONVERT(DATE, GETDATE()) Between CONVERT(DATE,V.start_date) AND CONVERT(DATE,V.end_date)
+			AND A.status = 'accept') > 0 THEN
+				   (SELECT TOP(1) V.end_time FROM [dbo].[tb_approval] A WITH(NOLOCK) 
+			INNER JOIN [dbo].[tb_vacation] V WITH(NOLOCK) ON A.approval_no = V.approval_no
+			INNER JOIN [dbo].[tb_vacation_type] VH WITH(NOLOCK) ON V.vacation_type_no = VH.vacation_type_no
+                                                      
+			WHERE VH.type in('90','91','92','93','94','95','96','97','98')  AND A.user_no =@user_no  AND CONVERT(DATE, GETDATE()) Between CONVERT(DATE,V.start_date) AND CONVERT(DATE,V.end_date)
+			AND A.status = 'accept') ELSE  C.work_start_time END ELSE '00:00:00' END AS work_start_time	
+				, CASE WHEN C.sat_work_YN = 'Y' THEN 
+
+					
+					CASE WHEN (SELECT count(*) FROM [dbo].[tb_approval] A WITH(NOLOCK) 
+			INNER JOIN [dbo].[tb_vacation] V WITH(NOLOCK) ON A.approval_no = V.approval_no
+			INNER JOIN [dbo].[tb_vacation_type] VH WITH(NOLOCK) ON V.vacation_type_no = VH.vacation_type_no
+                                                      
+			WHERE VH.type in('90','91','92','93','94','95','96','97','98')  AND A.user_no =@user_no  AND CONVERT(DATE, GETDATE()) Between CONVERT(DATE,V.start_date) AND CONVERT(DATE,V.end_date)
+			AND A.status = 'accept') > 0 THEN
+				   (SELECT TOP(1) V.end_time FROM [dbo].[tb_approval] A WITH(NOLOCK) 
+			INNER JOIN [dbo].[tb_vacation] V WITH(NOLOCK) ON A.approval_no = V.approval_no
+			INNER JOIN [dbo].[tb_vacation_type] VH WITH(NOLOCK) ON V.vacation_type_no = VH.vacation_type_no
+                                                      
+			WHERE VH.type in('90','91','92','93','94','95','96','97','98')  AND A.user_no =@user_no  AND CONVERT(DATE, GETDATE()) Between CONVERT(DATE,V.start_date) AND CONVERT(DATE,V.end_date)
+			AND A.status = 'accept') ELSE  C.work_end_time END ELSE '00:00:00' END AS work_end_time	
+				
+				
+				FROM [dbo].[tb_user] U WITH(NOLOCK)
+				INNER JOIN [dbo].[tb_company] C WITH(NOLOCK)
+				ON U.company_no = C.company_no	
+				WHERE user_no = @user_no
+			AND U.retireYN = 'N'
+		END
+
+	
+	
+	
+	-- Step 2-1 : 재택근무제 확인
+	ELSE IF EXISTS(		
+		SELECT *
+		FROM [dbo].[tb_telecommuting] TC WITH(NOLOCK)
+		WHERE TC.user_no = @user_no
+		AND TC.work_date = CONVERT(DATE, GETDATE())				
+	)
+	BEGIN
+		-- Step 2-2 : 재택근무제 적용
+		INSERT INTO [dbo].[tb_work_time_user] WITH(ROWLOCK)
+		(user_no, work_date, start_time, end_time, work_type)	
+		SELECT TOP 1 @user_no, TC.work_date, '00:00:00', '23:59:59', 'telecommuting'		
+		FROM [dbo].[tb_telecommuting] TC WITH(NOLOCK)
+		WHERE TC.user_no = @user_no
+		AND TC.work_date = CONVERT(DATE, GETDATE())						
+	END	
+
+	-- Step 3-1 : 간주근로제 확인
+	ELSE IF EXISTS(		
+		SELECT *
+		FROM [dbo].[tb_regard] R WITH(NOLOCK)
+		WHERE R.user_no = @user_no
+		AND R.work_date = CONVERT(DATE, GETDATE())				
+	)
+	BEGIN
+		-- Step 3-2 : 간주근로제 적용
+		INSERT INTO [dbo].[tb_work_time_user] WITH(ROWLOCK)
+		(user_no, work_date, start_time, end_time, work_type)	
+		SELECT TOP 1 @user_no, R.work_date, '00:00:00', '23:59:59', 'regard'		
+		FROM [dbo].[tb_regard] R WITH(NOLOCK)
+		WHERE R.user_no = @user_no
+		AND R.work_date = CONVERT(DATE, GETDATE())						
+	END	
+		
+	-- Step 4-1 : 탄력근무제 확인	
+	ELSE IF (@flexible_work_group_no IS NOT NULL)
+	BEGIN	
+		-- Step 4-2 : 탄력근무제 적용
+		INSERT INTO [dbo].[tb_work_time_user] WITH(ROWLOCK)
+		(user_no, work_date, start_time, end_time, rest_start_time, rest_end_time, work_type)			
+		SELECT @user_no, FWGS.work_date, FWGS.start_date, FWGS.end_date, FWGS.rest_start_date, FWGS.rest_end_date,'flexible'	
+		FROM [dbo].[tb_flexible_work_group] FWG WITH(NOLOCK)
+		INNER JOIN [dbo].[tb_flexible_work_group_schedule] FWGS WITH(NOLOCK)
+		ON FWG.flexible_work_group_no = FWGS.flexible_work_group_no
+		WHERE FWG.flexible_work_group_no = @flexible_work_group_no
+		AND CONVERT(DATE, FWGS.work_date) = CONVERT(DATE, GETDATE())
+	END
+	-- Step 5-1 : 선택근무제 확인
+	ELSE IF EXISTS (			
+		SELECT *
+		FROM [dbo].[tb_selective_work_schedule] SWS WITH(NOLOCK)
+		WHERE user_no = @user_no
+		AND CONVERT(DATE, SWS.work_date) = CONVERT(DATE, GETDATE())
+		AND ((@weekday = 1 AND @selective_sun_work_YN = 'Y')
+				OR (@weekday = 2 AND @selective_mon_work_YN = 'Y'
+				OR (@weekday = 3 AND @selective_tue_work_YN = 'Y')
+				OR (@weekday = 4 AND @selective_wed_work_YN = 'Y')
+				OR (@weekday = 5 AND @selective_thu_work_YN = 'Y')
+				OR (@weekday = 6 AND @selective_fri_work_YN = 'Y')
+				OR (@weekday = 7 AND @selective_sat_work_YN = 'Y')))
+	)
+	BEGIN	
+	IF(
+			(SELECT COUNT(*) FROM [dbo].[tb_work_time_user] WITH(NOLOCK)
+			WHERE user_no = @user_no
+			AND CONVERT(DATE, work_date) = CONVERT(DATE, GETDATE())) > 0
+		)
+		BEGIN
+			-- Step 5-2 : 선택근무제 적용
+			INSERT INTO [dbo].[tb_work_time_user] WITH(ROWLOCK)
+			(user_no, work_date, start_time, end_time, work_type)			
+			SELECT TOP 1 @user_no, SWS.work_date, SWS.start_date, SWS.end_date, 'selective'
+			FROM [dbo].[tb_selective_work_schedule] SWS WITH(NOLOCK)
+			WHERE user_no = @user_no
+			AND CONVERT(DATE, SWS.work_date) = CONVERT(DATE, GETDATE())
+			ORDER BY SWS.updatedTime DESC
+		END
+		ELSE
+		BEGIN
+			-- Step 5-2 : 선택근무제 적용
+			INSERT INTO [dbo].[tb_work_time_user] WITH(ROWLOCK)
+			(user_no, work_date, start_time, end_time, work_type)			
+			--SELECT TOP 1 @user_no, SWS.work_date, SWS.start_date, SWS.end_date, 'selective'
+			SELECT TOP 1 @user_no, SWS.work_date, '00:00:00', '00:00:00', 'selective'
+			FROM [dbo].[tb_selective_work_schedule] SWS WITH(NOLOCK)
+			WHERE user_no = @user_no
+			AND CONVERT(DATE, SWS.work_date) = CONVERT(DATE, GETDATE())
+			ORDER BY SWS.updatedTime DESC
+			END
+
+		
+	END
+		-- Step 5-1 : 자율출퇴근제 확인
+	ELSE IF EXISTS (
+		SELECT *
+		FROM [dbo].[tb_autonomous_work_schedule] AWS WITH(NOLOCK)
+		WHERE user_no = @user_no
+		AND CONVERT(DATE, AWS.work_date) = CONVERT(DATE, GETDATE())
+	)
+	BEGIN
+		-- Step 5-2 : 자율출퇴근제 적용
+		INSERT INTO [dbo].[tb_work_time_user] WITH(ROWLOCK)
+		(user_no, work_date, start_time, end_time, work_type)		
+		SELECT TOP 1 @user_no, AWS.work_date, AWS.start_date, AWS.end_date, 'autonomous'
+		FROM [dbo].[tb_autonomous_work_schedule] AWS WITH(NOLOCK)
+		WHERE user_no = @user_no
+		AND CONVERT(DATE, AWS.work_date) = CONVERT(DATE, GETDATE())
+		ORDER BY AWS.updatedTime DESC
+	END
+	-- Step 6-1 : 시차출퇴근제 확인
+	ELSE IF EXISTS(		
+		SELECT *
+		FROM [dbo].[tb_schedule] S WITH(NOLOCK)
+		WHERE S.user_no = @user_no
+		AND S.work_date = CONVERT(DATE, GETDATE())				
+	)
+	BEGIN
+		-- Step 6-2 : 시차출퇴근제 적용
+		INSERT INTO [dbo].[tb_work_time_user] WITH(ROWLOCK)
+		(user_no, work_date, start_time, end_time, rest_start_time, rest_end_time, work_type)	
+		SELECT TOP 1 @user_no, S.work_date, S.start_time, S.end_time, S.rest_start_time, S.rest_end_time, 'schedule'		
+		FROM [dbo].[tb_schedule] S WITH(NOLOCK)
+		WHERE S.user_no = @user_no
+		AND S.work_date = CONVERT(DATE, GETDATE())						
+	END	
+	-- Step 7-1 : 교대근무제 확인
+	ELSE IF EXISTS(
+		SELECT *
+		FROM [dbo].[tb_shift_work] SW WITH(NOLOCK)
+		WHERE SW.user_no = @user_no
+		AND SW.work_date = CONVERT(DATE, GETDATE())
+	)
+	BEGIN
+		-- Step 7-2 :  교대근무제 적용
+		INSERT INTO [dbo].[tb_work_time_user] WITH(ROWLOCK)
+		(user_no, work_date, start_time, end_time, rest_start_time, rest_end_time, work_type)
+		SELECT TOP 1 @user_no, SW.work_date, SW.work_start_time, SW.work_end_time, SW.rest_start_time, SW.rest_end_time,'shift'
+		FROM [dbo].[tb_shift_work] SW WITH(NOLOCK)
+		WHERE SW.user_no = @user_no
+		AND SW.work_date = CONVERT(DATE, GETDATE())
+		ORDER BY SW.createdTime DESC
+	END
+	ELSE
+	BEGIN
+		-- Step 8 : 표준근로 설정
+		IF(@weekday = 1)
+		BEGIN
+			INSERT INTO [dbo].[tb_work_time_user] WITH(ROWLOCK)
+			(user_no, work_date, start_time, end_time)	
+			SELECT @user_no, CONVERT(DATE, GETDATE())
+			, CASE WHEN C.sun_work_YN = 'Y' THEN C.work_start_time ELSE '00:00:00' END AS work_start_time
+			, CASE WHEN C.sun_work_YN = 'Y' THEN C.work_end_time ELSE '00:00:00' END AS work_end_time			
+			FROM [dbo].[tb_user] U WITH(NOLOCK)
+			INNER JOIN [dbo].[tb_company] C WITH(NOLOCK)
+			ON U.company_no = C.company_no
+			WHERE user_no = @user_no
+			AND U.retireYN = 'N'
+		END
+		ELSE IF(@weekday = 2)
+		BEGIN
+			INSERT INTO [dbo].[tb_work_time_user] WITH(ROWLOCK)
+			(user_no, work_date, start_time, end_time)	
+			SELECT @user_no, CONVERT(DATE, GETDATE())
+			, CASE WHEN C.mon_work_YN = 'Y' THEN C.work_start_time ELSE '00:00:00' END AS work_start_time
+			, CASE WHEN C.mon_work_YN = 'Y' THEN C.work_end_time ELSE '00:00:00' END AS work_end_time			
+			FROM [dbo].[tb_user] U WITH(NOLOCK)
+			INNER JOIN [dbo].[tb_company] C WITH(NOLOCK)
+			ON U.company_no = C.company_no
+			WHERE user_no = @user_no
+			AND U.retireYN = 'N'
+		END
+		ELSE IF(@weekday = 3)
+		BEGIN
+			INSERT INTO [dbo].[tb_work_time_user] WITH(ROWLOCK)
+			(user_no, work_date, start_time, end_time)		
+			SELECT @user_no, CONVERT(DATE, GETDATE())
+			, CASE WHEN C.tue_work_YN = 'Y' THEN C.work_start_time ELSE '00:00:00' END AS work_start_time
+			, CASE WHEN C.tue_work_YN = 'Y' THEN C.work_end_time ELSE '00:00:00' END AS work_end_time			
+			FROM [dbo].[tb_user] U WITH(NOLOCK)
+			INNER JOIN [dbo].[tb_company] C WITH(NOLOCK)
+			ON U.company_no = C.company_no
+			WHERE user_no = @user_no
+			AND U.retireYN = 'N'
+		END
+		ELSE IF(@weekday = 4)
+		BEGIN
+			INSERT INTO [dbo].[tb_work_time_user] WITH(ROWLOCK)
+			(user_no, work_date, start_time, end_time)	
+			SELECT @user_no, CONVERT(DATE, GETDATE())
+			, CASE WHEN C.wed_work_YN = 'Y' THEN C.work_start_time ELSE '00:00:00' END AS work_start_time
+			, CASE WHEN C.wed_work_YN = 'Y' THEN C.work_end_time ELSE '00:00:00' END AS work_end_time			
+			FROM [dbo].[tb_user] U WITH(NOLOCK)
+			INNER JOIN [dbo].[tb_company] C WITH(NOLOCK)
+			ON U.company_no = C.company_no
+			WHERE user_no = @user_no
+			AND U.retireYN = 'N'
+		END
+		ELSE IF(@weekday = 5)
+		BEGIN
+			INSERT INTO [dbo].[tb_work_time_user] WITH(ROWLOCK)
+			(user_no, work_date, start_time, end_time)	
+			SELECT @user_no, CONVERT(DATE, GETDATE())
+			, CASE WHEN C.thu_work_YN = 'Y' THEN C.work_start_time ELSE '00:00:00' END AS work_start_time
+			, CASE WHEN C.thu_work_YN = 'Y' THEN C.work_end_time ELSE '00:00:00' END AS work_end_time			
+			FROM [dbo].[tb_user] U WITH(NOLOCK)
+			INNER JOIN [dbo].[tb_company] C WITH(NOLOCK)
+			ON U.company_no = C.company_no
+			WHERE user_no = @user_no
+			AND U.retireYN = 'N'
+		END
+		ELSE IF(@weekday = 6)
+		BEGIN
+			INSERT INTO [dbo].[tb_work_time_user] WITH(ROWLOCK)
+			(user_no, work_date, start_time, end_time)	
+			SELECT @user_no, CONVERT(DATE, GETDATE())
+			, CASE WHEN C.fri_work_YN = 'Y' THEN C.work_start_time ELSE '00:00:00' END AS work_start_time
+			, CASE WHEN C.fri_work_YN = 'Y' THEN C.work_end_time ELSE '00:00:00' END AS work_end_time			
+			FROM [dbo].[tb_user] U WITH(NOLOCK)
+			INNER JOIN [dbo].[tb_company] C WITH(NOLOCK)
+			ON U.company_no = C.company_no
+			WHERE user_no = @user_no
+			AND U.retireYN = 'N'
+		END
+		ELSE IF(@weekday = 7)
+		BEGIN
+			INSERT INTO [dbo].[tb_work_time_user] WITH(ROWLOCK)
+			(user_no, work_date, start_time, end_time)	
+			SELECT @user_no, CONVERT(DATE, GETDATE())
+			, CASE WHEN C.sat_work_YN = 'Y' THEN C.work_start_time ELSE '00:00:00' END AS work_start_time
+			, CASE WHEN C.sat_work_YN = 'Y' THEN C.work_end_time ELSE '00:00:00' END AS work_end_time			
+			FROM [dbo].[tb_user] U WITH(NOLOCK)
+			INNER JOIN [dbo].[tb_company] C WITH(NOLOCK)
+			ON U.company_no = C.company_no
+			WHERE user_no = @user_no
+			AND U.retireYN = 'N'
+		END
+	END
+	END

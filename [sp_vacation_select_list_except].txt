@@ -1,0 +1,132 @@
+USE [03_TimeKeeper_YoungOne]
+GO
+/****** Object:  StoredProcedure [dbo].[sp_vacation_select_list_except]    Script Date: 2021-03-09 오후 4:31:26 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+-- =============================================
+-- Author:		brad cho
+-- Create date: 2019.06.24
+-- Description:	
+/*
+EXEC sp_vacation_select_list 2, null, '2020-01-01 00:00:00', '2020-01-31 23:59:59', 'accept', null, null, null, null, 1, 100
+select * from tb_work_time where user_no = 1295 and work_date = '2019-09-05' order by createdTime desc
+select * from tb_work_time order by createdTime desc
+delete from tb_work_time where user_no = 1295 and work_date = '2019-09-05' 
+*/
+-- =============================================
+ALTER PROCEDURE [dbo].[sp_vacation_select_list_except]		
+	@company_no				INT,
+	@user_no				INT,
+	@start_date				DATETIME,
+	@end_date				DATETIME,
+	@status					VARCHAR(8),
+	@vacation_name			VARCHAR(32),
+	@vacation_type			VARCHAR(32),
+	@user_name				VARCHAR(32),
+	@dept_name				VARCHAR(32),
+	@PageNumber				INT,
+	@RowsPage				INT
+AS
+BEGIN	
+	SET NOCOUNT ON;
+
+	-- MSSQL 예약어 처리 %, [, ], _
+	IF @dept_name IS NOT NULL
+	BEGIN
+		SET @dept_name = REPLACE(REPLACE(REPLACE(REPLACE(@dept_name,'[','\['),']','\]'),'_','\_'),'%','\%')
+	END
+	ELSE
+	BEGIN
+		SET @dept_name = ''
+	END
+	
+	IF @user_name IS NOT NULL
+	BEGIN
+		SET @user_name = REPLACE(REPLACE(REPLACE(REPLACE(@user_name,'[','\['),']','\]'),'_','\_'),'%','\%')
+	END
+	ELSE
+	BEGIN
+		SET @user_name = ''
+	END
+	
+
+	SELECT *
+	FROM (
+		SELECT ROW_NUMBER() OVER(ORDER BY V.createdTime DESC) AS num
+		, V.vacation_no, V.createdTime, V.start_date, V.end_date, V.vacation_days, V.memo
+		, ISNULL(A.status, '') AS status, ISNULL(A.approval_no, 0) AS approval_no
+		, ISNULL(VT.vacation_name, V.vacation_name) AS vacation_name, ISNULL(VT.type, '') AS type
+		, VT.apply_YN, V.work_hour, VT.daily_work_hour AS basic_work_hour
+		, A.createdTime AS request_time
+		, U.user_id, U.name AS user_name, ISNULL(U.position, '') AS position, D.name AS dept_name	
+		, V.start_time, V.end_time, V.allday_YN
+		, ISNULL(A.accept_user_no,'') as accept_user_no
+		, ISNULL((CASE WHEN @status = 'request' THEN (SELECT U.name FROM [dbo].[tb_user] U WITH(NOLOCK) WHERE U.user_no = A.user_sent_to) ELSE (SELECT U.name FROM [dbo].[tb_user] U WITH(NOLOCK) WHERE U.user_no = A.accept_user_no) END),'') AS accept_user_name
+		, REPLACE((SELECT COUNT(approval_no) FROM [dbo].[tb_approval_line] AL WITH(NOLOCK) WHERE AL.approval_no = A.approval_no), 0, 1) AS accept_user_line_count_all
+		, CASE 
+			WHEN NOT EXISTS(SELECT approval_no FROM [dbo].[tb_approval_line] AL WITH(NOLOCK) WHERE AL.approval_no = A.approval_no)
+			THEN CASE WHEN A.status = 'request' THEN 0 ELSE 1 END
+			ELSE (SELECT COUNT(approval_no) FROM [dbo].[tb_approval_line] AL WITH(NOLOCK) WHERE AL.approval_no = A.approval_no AND AL.approvalYN = 'Y') 
+		  END AS accept_user_line_count
+		FROM [dbo].[tb_vacation] V WITH(NOLOCK)						
+		INNER JOIN [dbo].[tb_user] U WITH(NOLOCK)
+		ON (V.user_no = U.user_no AND U.retireYN = 'N')
+		INNER JOIN [dbo].[tb_dept_user] DU WITH(NOLOCK)
+		ON U.user_no = DU.user_no
+		INNER JOIN [dbo].[tb_dept] D WITH(NOLOCK)
+		ON DU.dept_no = D.dept_no
+	    INNER JOIN [dbo].[tb_vacation_type] VT WITH(NOLOCK)
+		--WHERE VH.type not in('90','91','92','93','94','95','96','97','98')  AND A.user_no =@user_no  AND CONVERT(DATE, GETDATE()) Between CONVERT(DATE,V.start_date) AND CONVERT(DATE,V.end_date)
+			--AND A.status = 'accept'
+		ON V.vacation_type_no = VT.vacation_type_no
+		AND VT.type not in('90','91','92','93','94','95','96','97','98')
+
+		INNER JOIN [dbo].[tb_approval] A WITH(NOLOCK)
+		ON V.approval_no = A.approval_no
+		WHERE U.company_no = @company_no		
+		AND V.user_no = CASE WHEN @user_no IS NULL THEN V.user_no ELSE @user_no END
+		--AND ((CONVERT(char(23), V.start_date, 23) BETWEEN @start_date AND @end_date) OR (CONVERT(char(23), V.end_date, 23) BETWEEN @start_date AND @end_date))
+		--AND V.createdTime BETWEEN @start_date AND @end_date
+		--AND @start_date < V.end_date
+		AND ((CONVERT(char(23), V.start_date, 23) BETWEEN @start_date AND @end_date) OR (CONVERT(char(23), V.end_date, 23) BETWEEN @start_date AND @end_date) 
+			OR ((@start_date BETWEEN CONVERT(DATE, V.start_date) AND (CONVERT(DATE, V.end_date))) AND @end_date BETWEEN CONVERT(DATE, V.start_date) AND CONVERT(DATE, V.end_date)))
+		AND ISNULL(A.status, '') = CASE WHEN @status IS NULL THEN ISNULL(A.status, '') ELSE @status END
+		AND V.vacation_name LIKE CASE WHEN @vacation_name IS NULL THEN V.vacation_name ELSE '%' + @vacation_name + '%' END
+		AND ISNULL(VT.type, '') LIKE CASE WHEN @vacation_type IS NULL THEN ISNULL(VT.type, '') ELSE '%' + @vacation_type + '%' END
+		AND U.name LIKE CASE WHEN @user_name IS NULL THEN U.name ELSE '%' + @user_name + '%' END ESCAPE '\'
+		AND D.name LIKE CASE WHEN @dept_name IS NULL THEN D.name ELSE '%' + @dept_name + '%' END ESCAPE '\'
+	) T
+	WHERE num BETWEEN ((@PageNumber - 1) * @RowsPage + 1) AND (@PageNumber * @RowsPage)
+
+	-- 페이징 처리를 위한 토탈 카운트
+	SELECT COUNT(*) AS total_count
+	FROM [dbo].[tb_vacation] V WITH(NOLOCK)						
+	INNER JOIN [dbo].[tb_user] U WITH(NOLOCK)
+	ON (V.user_no = U.user_no AND U.retireYN = 'N')
+	INNER JOIN [dbo].[tb_dept_user] DU WITH(NOLOCK)
+	ON U.user_no = DU.user_no
+	INNER JOIN [dbo].[tb_dept] D WITH(NOLOCK)
+	ON DU.dept_no = D.dept_no
+	LEFT OUTER JOIN [dbo].[tb_vacation_type] VT WITH(NOLOCK)
+	ON V.vacation_type_no = VT.vacation_type_no
+	AND VT.type not in('90','91','92','93','94','95','96','97','98')
+	LEFT OUTER JOIN [dbo].[tb_approval] A WITH(NOLOCK)
+	ON V.approval_no = A.approval_no
+	WHERE U.company_no = @company_no		
+	AND V.user_no = CASE WHEN @user_no IS NULL THEN V.user_no ELSE @user_no END
+	--AND V.createdTime BETWEEN @start_date AND @end_date
+	--AND ((CONVERT(char(23), V.start_date, 23) BETWEEN @start_date AND @end_date) OR (CONVERT(char(23), V.end_date, 23) BETWEEN @start_date AND @end_date))
+	--AND @start_date < V.end_date
+	--AND ((CONVERT(char(23), V.start_date, 23) BETWEEN @start_date AND @end_date) OR (CONVERT(char(23), V.end_date, 23) BETWEEN @start_date AND @end_date) AND (@start_date < V.end_date))
+	AND ((CONVERT(char(23), V.start_date, 23) BETWEEN @start_date AND @end_date) OR (CONVERT(char(23), V.end_date, 23) BETWEEN @start_date AND @end_date) 
+			OR ((@start_date BETWEEN CONVERT(DATE, V.start_date) AND (CONVERT(DATE, V.end_date))) AND @end_date BETWEEN CONVERT(DATE, V.start_date) AND CONVERT(DATE, V.end_date)))
+	AND ISNULL(A.status, '') = CASE WHEN @status IS NULL THEN ISNULL(A.status, '') ELSE @status END
+	AND V.vacation_name LIKE CASE WHEN @vacation_name IS NULL THEN V.vacation_name ELSE '%' + @vacation_name + '%' END
+	AND ISNULL(VT.type, '') LIKE CASE WHEN @vacation_type IS NULL THEN ISNULL(VT.type, '') ELSE '%' + @vacation_type + '%' END
+	AND U.name LIKE CASE WHEN @user_name IS NULL THEN U.name ELSE '%' + @user_name + '%' END ESCAPE '\'
+	AND D.name LIKE CASE WHEN @dept_name IS NULL THEN D.name ELSE '%' + @dept_name + '%' END ESCAPE '\'
+END
+	
+
